@@ -139,8 +139,13 @@ static size_t nvmm_iov_copy_to(void *from, struct iov_iter *i, size_t bytes)
 static int nvmm_open_file(struct inode *inode, struct file *filp)
 {
 	int errval = 0;
+	struct super_block *sb;
+	struct inode *consistency_i;
+	sb = inode->i_sb;
+	consistency_i = NVMM_SB(sb)->consistency_i;
 //	pid_t pid = current->pid;
 	errval = nvmm_establish_mapping(inode);
+	errval = nvmm_establish_mapping(consistency_i);
 //	printk("the process pid is : %d\n", pid);
 	if(errval){
 		nvmm_error(inode->i_sb, __FUNCTION__, "can't establish mapping\n");
@@ -161,12 +166,18 @@ static int nvmm_release_file(struct file * file)
     struct inode *inode = file->f_mapping->host;
 	struct nvmm_inode_info *ni_info;
 	unsigned long vaddr;
+	struct super_block *sb;
+	struct inode *consistency_i;
 	int err = 0;
+	sb = inode->i_sb;
+	consistency_i = NVMM_SB(sb)->consistency_i;
 	ni_info = NVMM_I(inode);
 	vaddr = (unsigned long)ni_info->i_virt_addr;
 	if(vaddr){
-		if(atomic_dec_and_test(&ni_info->i_p_counter))
+		if(atomic_dec_and_test(&ni_info->i_p_counter)){
 			err = nvmm_destroy_mapping(inode);
+			err = nvmm_destroy_mapping(consistency_i);
+		}
 
 //		printk("release, ino = %ld, process num = %d, vaddr = %lx\n", inode->i_ino, (ni_info->i_p_counter).counter, vaddr);
 
@@ -252,8 +263,10 @@ static int nvmm_change_pte_entry(struct super_block *sb, struct inode *normal_i,
 	pud_t *pud_normal, *pud_con;
 	pmd_t *pmd_normal, *pmd_con;
 	unsigned long temp_cp_addr, end_cp_addr;
-
+	struct nvmm_inode_info *ni_info;
+	ni_info = NVMM_I(normal_i);
 	pud_normal = nvmm_get_pud(sb, normal_i->i_ino);
+	atomic_set(&ni_info->switch_counter, 0);
 	pud_con = nvmm_get_pud(sb, consistency_i->i_ino);
 	pmd_normal = pmd_offset(pud_normal, start_cp_addr);
 	pmd_con = pmd_offset(pud_con, start_cp_addr);
@@ -261,7 +274,9 @@ static int nvmm_change_pte_entry(struct super_block *sb, struct inode *normal_i,
 
 	for(temp_cp_addr = start_cp_addr; temp_cp_addr <= end_cp_addr; temp_cp_addr += PAGE_SIZE){
 		ret = nvmm_switch_pte_entry(pmd_normal, pmd_con, temp_cp_addr);
+		atomic_inc(&ni_info->switch_counter);
 	}
+	atomic_set(&ni_info->switch_counter, 0);
 
 	return ret;
 }
@@ -352,7 +367,6 @@ static int nvmm_consistency_function(struct super_block *sb, struct inode *norma
 	con_nvmm_inode = nvmm_get_inode(sb, consistency_i->i_ino);
 	if(!con_nvmm_inode->i_pg_addr)
 		nvmm_init_pg_table(sb, consistency_i->i_ino);
-	ret = nvmm_establish_mapping(consistency_i);
 	consistency_i_info = NVMM_I(consistency_i);
 	normal_i_info = NVMM_I(normal_i);
 	normal_vaddr = (unsigned long)normal_i_info->i_virt_addr;
@@ -379,7 +393,6 @@ static int nvmm_consistency_function(struct super_block *sb, struct inode *norma
 	write_start_vaddr = (void *)(consistency_vaddr + offset);
 	ret = nvmm_iov_copy_from(write_start_vaddr, iter, length);
 	ret = nvmm_change_pud_entry(sb, normal_i, consistency_i, (unsigned long)start_cp_addr, need_block_size);
-	ret = nvmm_destroy_mapping(consistency_i);
 
 	return ret;
 }
@@ -439,15 +452,17 @@ ssize_t nvmm_direct_IO(int rw, struct kiocb *iocb,
 				goto out;
 			}
 		}
-
-		nvmm_consistency_function(sb, inode, offset, length, &iter);
+		if(offset == size){
+			nvmm_consistency_function(sb, inode, offset, length, &iter);
+		}else{
+			nvmm_consistency_function(sb, inode, offset, length, &iter);
+		}
 		retval = length;
-/*		retval = nvmm_iov_copy_from(start_vaddr, &iter, length);
+//		retval = nvmm_iov_copy_from(start_vaddr, &iter, length);
 		if(retval != length){
 			retval = -EFAULT;
 			goto out;
 		}
-*/
 	}
 
 out :

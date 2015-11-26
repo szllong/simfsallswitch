@@ -60,6 +60,7 @@ struct nvmm_inode_info{
 
 	spinlock_t i_meta_spinlock;
 	spinlock_t truncate_spinlock;
+	atomic_t switch_counter;
 //
 	struct inode	vfs_inode;
 };
